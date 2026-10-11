@@ -3,6 +3,7 @@ import sys
 from io import StringIO
 import traceback
 from typing import List
+import json
 import requests
 
 from fastapi import FastAPI
@@ -66,7 +67,7 @@ def analyze_error_with_ai(code: str, traceback_str: str) -> List[int]:
     url = "https://aipipe.org"
     
     headers = {
-        "Content-Type": application/json,
+        "Content-Type": "application/json",
         "Authorization": f"Bearer {token}"
     }
 
@@ -82,7 +83,7 @@ TRACEBACK:
 
 Return the line number(s) where the error is located. Your response must be a valid JSON object matching this schema exactly:
 {{
-    "error_lines": [3]
+    "error_lines": [int]
 }}
 """
 
@@ -101,8 +102,6 @@ Return the line number(s) where the error is located. Your response must be a va
         # Unpack the content returned inside the standard chat structure
         ai_content = response_json["choices"][0]["message"]["content"]
         
-        # Safely evaluate string dictionary back to Python
-        import json
         data = json.loads(ai_content)
         return data.get("error_lines", [])
     except Exception as e:
