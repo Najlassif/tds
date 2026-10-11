@@ -3,12 +3,11 @@ import sys
 from io import StringIO
 import traceback
 from typing import List
+import requests
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from google import genai
-from google.genai import types
 
 # ----------------------------------------------------
 # 1. INITIALIZE & CORS SETUP
@@ -33,9 +32,6 @@ class CodeRequest(BaseModel):
 class CodeResponse(BaseModel):
     error: List[int]
     result: str
-
-class ErrorAnalysis(BaseModel):
-    error_lines: List[int]
 
 # ----------------------------------------------------
 # 3. HELPER LOGIC FUNCTIONS
@@ -62,14 +58,17 @@ def execute_python_code(code: str) -> dict:
 
 def analyze_error_with_ai(code: str, traceback_str: str) -> List[int]:
     """
-    Passes the failed code and crash information to Gemini AI via AI Pipe, 
-    forcing it to respond only with structural line numbers.
+    Passes the failed code and crash information to Gemini AI via AI Pipe 
+    using clean HTTP requests to prevent SDK routing errors.
     """
-    # CORRECTED: Pointing to the proper subroute suffix /openai/v1 for proxy compatibility
-    client = genai.Client(
-        api_key="eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjYzZjMwMDAyNTlAZHMuc3R1ZHkuaW1tLmFjLmluIiIsImloZCI6MTc1MTQ0NTk0NywiaXN6IjVraHR0cHM6Ly9haXBpcGUub3JnIiwidXNlckloIjoiYWlwaXBlXBlbWFwYSIsImV4cCI6MTc1MjA5NTM0N0030.x488EnS4i4ev3YBB8Q7uGum1MdAOi0OpwkHCEqfSAOs",
-        http_options={"base_url": "https://aipipe.org"}
-    )
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjYzZjMwMDAyNTlAZHMuc3R1ZHkuaW1tLmFjLmluIiIsImloZCI6MTc1MTQ0NTk0NywiaXN6IjVraHR0cHM6Ly9haXBpcGUub3JnIiwidXNlckloIjoiYWlwaXBlXBlbWFwYSIsImV4cCI6MTc1MjA5NTM0N0030.x488EnS4i4ev3YBB8Q7uGum1MdAOi0OpwkHCEqfSAOs"
+    
+    url = "https://aipipe.org"
+    
+    headers = {
+        "Content-Type": application/json,
+        "Authorization": f"Bearer {token}"
+    }
 
     prompt = f"""
 Analyze this Python code and its error traceback.
@@ -81,49 +80,49 @@ CODE:
 TRACEBACK:
 {traceback_str}
 
-Return the line number(s) where the error is located.
+Return the line number(s) where the error is located. Your response must be a valid JSON object matching this schema exactly:
+{{
+    "error_lines": [3]
+}}
 """
 
-    # CORRECTED: Added the model provider string 'openai/' as strictly required by AI Pipe
-    response = client.models.generate_content(
-        model='openai/gemini-2.0-flash-exp',
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "error_lines": types.Schema(
-                        type=types.Type.ARRAY,
-                        items=types.Schema(type=types.Type.INTEGER)
-                    )
-                },
-                required=["error_lines"]
-            )
-        )
-    )
+    payload = {
+        "model": "google/gemini-2.0-flash-lite-001",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "response_format": {"type": "json_object"}
+    }
 
-    result = ErrorAnalysis.model_validate_json(response.text)
-    return result.error_lines
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response_json = response.json()
+        
+        # Unpack the content returned inside the standard chat structure
+        ai_content = response_json["choices"][0]["message"]["content"]
+        
+        # Safely evaluate string dictionary back to Python
+        import json
+        data = json.loads(ai_content)
+        return data.get("error_lines", [])
+    except Exception as e:
+        print("AI Processing Exception Error:", str(e))
+        return []
 
 # ----------------------------------------------------
 # 4. FASTAPI ENDPOINT ROUTES
 # ----------------------------------------------------
-# Accepting both paths with and without trailing slash to support any autograder format
 @app.post("/code-interpreter/")
 @app.post("/code-interpreter", response_model=CodeResponse)
 async def interpret_code(request: CodeRequest):
-    # Execute the incoming code string
     execution = execute_python_code(request.code)
     
-    # If the execution went perfectly fine with no runtime flaws
     if execution["success"]:
         return CodeResponse(
             error=[], 
             result=execution["output"]
         )
     
-    # If the program execution failed, use AI to pinpoint the broken line numbers
     error_lines = analyze_error_with_ai(request.code, execution["output"])
     
     return CodeResponse(
