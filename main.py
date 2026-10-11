@@ -4,6 +4,7 @@ from io import StringIO
 import traceback
 from typing import List
 import json
+import re
 import requests
 
 from fastapi import FastAPI
@@ -59,11 +60,10 @@ def execute_python_code(code: str) -> dict:
 
 def analyze_error_with_ai(code: str, traceback_str: str) -> List[int]:
     """
-    Passes the failed code and crash information to Gemini AI via AI Pipe 
-    using clean HTTP requests to prevent SDK routing errors.
+    Passes the failed code and crash information to Gemini AI via AI Pipe.
+    Parses out integers directly to eliminate structural JSON matching failures.
     """
     token = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjYzZjMwMDAyNTlAZHMuc3R1ZHkuaW1tLmFjLmluIiIsImloZCI6MTc1MTQ0NTk0NywiaXN6IjVraHR0cHM6Ly9haXBpcGUub3JnIiwidXNlckloIjoiYWlwaXBlXBlbWFwYSIsImV4cCI6MTc1MjA5NTM0N0030.x488EnS4i4ev3YBB8Q7uGum1MdAOi0OpwkHCEqfSAOs"
-    
     url = "https://aipipe.org"
     
     headers = {
@@ -71,20 +71,23 @@ def analyze_error_with_ai(code: str, traceback_str: str) -> List[int]:
         "Authorization": f"Bearer {token}"
     }
 
+    # Number the rows visually so the LLM doesn't guess or offset the indexes
+    numbered_lines = []
+    for idx, line in enumerate(code.splitlines(), start=1):
+        numbered_lines.append(f"Line {idx}: {line}")
+    code_with_numbers = "\n".join(numbered_lines)
+
     prompt = f"""
-Analyze this Python code and its error traceback.
-Identify the line number(s) where the error occurred.
+Identify the EXACT line number(s) in the python script where the execution failure/crash originates.
+Look closely at the traceback file log to match the line index accurately.
 
-CODE:
-{code}
+CODE WITH LINE NUMBERS:
+{code_with_numbers}
 
-TRACEBACK:
+TRACEBACK LOG:
 {traceback_str}
 
-Return the line number(s) where the error is located. Your response must be a valid JSON object matching this schema exactly:
-{{
-    "error_lines": [int]
-}}
+Respond ONLY with the raw integers inside a comma-separated list bracket (e.g., [2] or [3, 4]). Do not add extra text explanation.
 """
 
     payload = {
@@ -92,20 +95,24 @@ Return the line number(s) where the error is located. Your response must be a va
         "messages": [
             {"role": "user", "content": prompt}
         ],
-        "response_format": {"type": "json_object"}
+        "temperature": 0.0  # Keep choices strict and predictable
     }
 
     try:
         response = requests.post(url, headers=headers, json=payload)
         response_json = response.json()
-        
-        # Unpack the content returned inside the standard chat structure
         ai_content = response_json["choices"][0]["message"]["content"]
         
-        data = json.loads(ai_content)
-        return data.get("error_lines", [])
+        # Pull all integers out from the AI's textual answer using regular expressions
+        numbers = [int(num) for num in re.findall(r'\d+', ai_content)]
+        
+        # Cross-validate to prevent the AI from returning line numbers larger than the code block length
+        total_lines = len(code.splitlines())
+        valid_numbers = [n for n in numbers if 1 <= n <= total_lines]
+        
+        return list(set(valid_numbers))
     except Exception as e:
-        print("AI Processing Exception Error:", str(e))
+        print("AI Extraction Fallback:", str(e))
         return []
 
 # ----------------------------------------------------
