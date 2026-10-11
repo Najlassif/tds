@@ -108,6 +108,7 @@ Return the line number(s) where the error is located.
 # ----------------------------------------------------
 # 4. FASTAPI ENDPOINT ROUTE
 # ----------------------------------------------------
+@app.post("/code-interpreter/")
 @app.post("/code-interpreter", response_model=CodeResponse)
 async def interpret_code(request: CodeRequest):
     # Execute the incoming code string
