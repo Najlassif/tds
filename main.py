@@ -4,7 +4,6 @@ from io import StringIO
 import traceback
 from typing import List
 import json
-import re
 import requests
 
 from fastapi import FastAPI
@@ -60,10 +59,12 @@ def execute_python_code(code: str) -> dict:
 
 def analyze_error_with_ai(code: str, traceback_str: str) -> List[int]:
     """
-    Passes the failed code and crash information to Gemini AI via AI Pipe.
-    Parses out integers directly to eliminate structural JSON matching failures.
+    Passes the failed code and crash information to the LLM via AI Pipe.
+    Uses robust prompt parsing to guarantee line extraction.
     """
     token = "eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjYzZjMwMDAyNTlAZHMuc3R1ZHkuaW1tLmFjLmluIiIsImloZCI6MTc1MTQ0NTk0NywiaXN6IjVraHR0cHM6Ly9haXBpcGUub3JnIiwidXNlckloIjoiYWlwaXBlXBlbWFwYSIsImV4cCI6MTc1MjA5NTM0N0030.x488EnS4i4ev3YBB8Q7uGum1MdAOi0OpwkHCEqfSAOs"
+    
+    # Using the standard AI Pipe endpoint mapping
     url = "https://aipipe.org"
     
     headers = {
@@ -71,48 +72,61 @@ def analyze_error_with_ai(code: str, traceback_str: str) -> List[int]:
         "Authorization": f"Bearer {token}"
     }
 
-    # Number the rows visually so the LLM doesn't guess or offset the indexes
-    numbered_lines = []
-    for idx, line in enumerate(code.splitlines(), start=1):
-        numbered_lines.append(f"Line {idx}: {line}")
-    code_with_numbers = "\n".join(numbered_lines)
-
     prompt = f"""
-Identify the EXACT line number(s) in the python script where the execution failure/crash originates.
-Look closely at the traceback file log to match the line index accurately.
+Analyze this Python code and its error traceback.
+Identify the exact line number(s) where the error occurred.
 
-CODE WITH LINE NUMBERS:
-{code_with_numbers}
+CODE:
+{code}
 
-TRACEBACK LOG:
+TRACEBACK:
 {traceback_str}
 
-Respond ONLY with the raw integers inside a comma-separated list bracket (e.g., [2] or [3, 4]). Do not add extra text explanation.
+Return the line number(s) where the error is located. You MUST respond with a valid JSON object matching this schema exactly:
+{{
+    "error_lines": [3]
+}}
+Do not write any markdown code blocks or explanations outside the JSON object.
 """
 
     payload = {
-        "model": "google/gemini-2.0-flash-lite-001",
+        "model": "openai/gpt-4o-mini",
         "messages": [
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.0  # Keep choices strict and predictable
+        "response_format": {"type": "json_object"}
     }
 
     try:
         response = requests.post(url, headers=headers, json=payload)
         response_json = response.json()
+        
         ai_content = response_json["choices"][0]["message"]["content"]
         
-        # Pull all integers out from the AI's textual answer using regular expressions
-        numbers = [int(num) for num in re.findall(r'\d+', ai_content)]
+        # Strip code block wrappers if the AI accidentally added them
+        ai_content = ai_content.replace("```json", "").replace("```", "").strip()
         
-        # Cross-validate to prevent the AI from returning line numbers larger than the code block length
-        total_lines = len(code.splitlines())
-        valid_numbers = [n for n in numbers if 1 <= n <= total_lines]
+        data = json.loads(ai_content)
+        lines = data.get("error_lines", [])
         
-        return list(set(valid_numbers))
+        # Safety fallback parsing if the list returned strings instead of ints
+        return [int(x) for x in lines if str(x).isdigit()]
     except Exception as e:
-        print("AI Extraction Fallback:", str(e))
+        print("AI Processing Exception Error:", str(e))
+        
+        # Fallback Parser: Try to extract line number directly from raw traceback string 
+        # if the AI call fails or gives a parsing anomaly.
+        try:
+            for line in traceback_str.split('\n'):
+                if 'File "<string>", line' in line:
+                    parts = line.split(',')
+                    for p in parts:
+                        if 'line' in p:
+                            num = ''.join(c for c in p if c.isdigit())
+                            if num:
+                                return [int(num)]
+        except:
+            pass
         return []
 
 # ----------------------------------------------------
